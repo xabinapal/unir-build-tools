@@ -1,60 +1,84 @@
-JENKINS_DOCKER_AGENT_SECRET := 23d26b0920a09d45e01b599897e206334051dd267a27a9cbd42a07ba8e95b0e5
-JENKINS_MAVEN_AGENT_SECRET := e5c1844b4d36b785474c0edac1cd98cbbc29ca9f4b7c458190689815b9eb143e
-JENKINS_NODE_AGENT_SECRET := c9bd73c339b2a31ae7e334398b92e50ff50585b4e75dbfafb5ce975bf7cc6397
-GITLAB_TOKEN := 1Lrw11yzWRrsaiZLxwci
+.POSIX:
+.SILENT:
 
 .PHONY: all $(MAKECMDGOALS)
 
+JENKINS_SERVER_REGISTRY := docker.io/jenkins/jenkins
+JENKINS_SERVER_TAG := 2.452-jdk17
+
+JENKINS_AGENT_REGISTRY := docker.io/jenkins/inbound-agent
+JENKINS_AGENT_TAG := 3206.vb_15dcf73f6a_9-9-alpine3.19-jdk17
+
+DOCKER_DIND_REGISTRY := docker.io/library/docker
+DOCKER_DIND_TAG := 25.0.5-dind-alpine3.19
+
+.build-agent/%:
+	docker build \
+		--build-arg JENKINS_REGISTRY="$(JENKINS_AGENT_REGISTRY)" \
+		--build-arg JENKINS_TAG="$(JENKINS_AGENT_TAG)" \
+		--tag localhost/jenkins-agent-$* \
+		--file agents/Dockerfile.$* \
+		.
+
+.start-agent/%:
+	docker run -d --rm --init \
+		--name jenkins-agent-$* \
+		--network jenkins \
+		--env DOCKER_HOST=tcp://docker:2376 \
+		--env DOCKER_CERT_PATH=/certs/client \
+		--env DOCKER_TLS_VERIFY=1 \
+		--env JENKINS_URL=http://jenkins-server:8080 \
+		--env JENKINS_AGENT_NAME=agent01 \
+		--env JENKINS_AGENT_WORKDIR=/home/jenkins/agent \
+		--env JENKINS_SECRET=$(shell cat secrets/jenkins-agent-$*) \
+		--volume jenkins-docker-certs:/certs/client:ro \
+		localhost/jenkins-agent-$*
+
+build-agents: .build-agent/docker .build-agent/maven .build-agent/node
 build-agents:
-	docker build -t jenkins-agent-docker ./jenkins-agent-docker
-	docker build -t jenkins-agent-maven ./jenkins-agent-maven
-	docker build -t jenkins-agent-node ./jenkins-agent-node
 
-start-simple-jenkins:
-	docker run -d --rm --stop-timeout 60 --name jenkins-server --volume jenkins-data:/var/jenkins_home -p 8080:8080 -p 50000:50000 jenkins/jenkins:lts
+start-server:
+	-docker network create jenkins
+	docker run -d --rm --init \
+		--name jenkins-docker \
+		--network jenkins \
+		--network-alias docker \
+		--privileged \
+		--env DOCKER_TLS_CERTDIR=/certs \
+		--volume jenkins-data:/var/jenkins_home \
+		--volume jenkins-docker-certs:/certs/client \
+		--publish 2376:2376 \
+		--publish 80:80 \
+		$(DOCKER_DIND_REGISTRY):$(DOCKER_DIND_TAG)
+	docker run -d --rm --init \
+		--name jenkins-server \
+		--network jenkins \
+		--env DOCKER_HOST=tcp://docker:2376 \
+		--env DOCKER_CERT_PATH=/certs/client \
+		--env DOCKER_TLS_VERIFY=1 \
+		--volume jenkins-data:/var/jenkins_home \
+		--volume jenkins-docker-certs:/certs/client:ro \
+		--publish 8080:8080 \
+		--publish 50000:50000 \
+		$(JENKINS_SERVER_REGISTRY):$(JENKINS_SERVER_TAG)
 
-start-jenkins:
-	docker network create jenkins || true
-	docker run -d --rm --stop-timeout 60 --network jenkins --name jenkins-docker --privileged --network-alias docker  --env DOCKER_TLS_CERTDIR=/certs  --volume jenkins-docker-certs:/certs/client  --volume jenkins-data:/var/jenkins_home -p 2376:2376 -p 80:80 docker:dind
-	docker run -d --rm --stop-timeout 60 --network jenkins --name jenkins-server --env DOCKER_HOST=tcp://docker:2376 --env DOCKER_CERT_PATH=/certs/client --env DOCKER_TLS_VERIFY=1 --volume jenkins-data:/var/jenkins_home --volume jenkins-docker-certs:/certs/client:ro -p 8080:8080 -p 50000:50000 jenkins/jenkins:2.249.2-lts-alpine
-	sleep 30
-	docker run -d --rm --network jenkins --name jenkins-agent-docker --init --env DOCKER_HOST=tcp://docker:2376 --env DOCKER_CERT_PATH=/certs/client --env DOCKER_TLS_VERIFY=1 --volume jenkins-docker-certs:/certs/client:ro --env JENKINS_URL=http://jenkins-server:8080 --env JENKINS_AGENT_NAME=agent01 --env JENKINS_SECRET=$(JENKINS_DOCKER_AGENT_SECRET) --env JENKINS_AGENT_WORKDIR=/home/jenkins/agent jenkins-agent-docker
-	docker run -d --rm --network jenkins --name jenkins-agent-maven --init --env JENKINS_URL=http://jenkins-server:8080 --env JENKINS_AGENT_NAME=agent02 --env JENKINS_SECRET=$(JENKINS_MAVEN_AGENT_SECRET) --env JENKINS_AGENT_WORKDIR=/home/jenkins/agent jenkins-agent-maven
-	docker run -d --rm --network jenkins --name jenkins-agent-node --init --env JENKINS_URL=http://jenkins-server:8080 --env JENKINS_AGENT_NAME=agent03 --env JENKINS_SECRET=$(JENKINS_NODE_AGENT_SECRET) --env JENKINS_AGENT_WORKDIR=/home/jenkins/agent jenkins-agent-node
+start-agents: .start-agent/docker .start-agent/maven .start-agent/node
+start-agents:
 
+password:
+	docker exec jenkins-server \
+		cat /var/jenkins_home/secrets/initialAdminPassword
+	echo ""
 
-jenkins-password:
-	docker exec jenkins-server cat /var/jenkins_home/secrets/initialAdminPassword && echo ""
+stop:
+	-docker stop jenkins-agent-docker
+	-docker stop jenkins-agent-maven
+	-docker stop jenkins-agent-node
+	-docker stop jenkins-docker
+	-docker stop jenkins-server
+	-docker network rm jenkins
 
-stop-jenkins:
-	docker stop jenkins-agent-docker || true
-	docker stop jenkins-agent-maven || true
-	docker stop jenkins-agent-node || true
-	docker stop jenkins-docker || true
-	docker stop jenkins-server || true
-	docker network rm jenkins || true
-
-
-start-gitlab:
-	docker network create gitlab || true
-	docker run -d --rm --stop-timeout 60 --network gitlab --hostname localhost --name gitlab-server -p 80:80 -p 443:443 -p 2222:22 --volume gitlab_config:/etc/gitlab --volume gitlab_logs:/var/log/gitlab --volume gitlab_data:/var/opt/gitlab gitlab/gitlab-ce:latest
-	sleep 90
-	docker run -d --rm --network gitlab --name gitlab-runner --volume gitlab-runner-config:/etc/gitlab-runner gitlab/gitlab-runner
-	docker run --rm --network gitlab --volume gitlab-runner-config:/etc/gitlab-runner gitlab/gitlab-runner register --non-interactive --executor "shell" --url "http://gitlab-server/" --registration-token "$(GITLAB_TOKEN)" --description "runner01" --tag-list "ssh" --locked="false" --access-level="not_protected"
-
-stop-gitlab:
-	docker stop gitlab-server || true
-	docker stop gitlab-runner || true
-	docker network rm gitlab || true
-
-start-nexus:
-	docker run -d --name nexus-server -v nexus-data:/nexus-data -p 8081:8081 sonatype/nexus3
-
-start-nexus-jenkins:
-	docker run -d --rm --network jenkins --name nexus-server -v nexus-data:/nexus-data -p 8081:8081 sonatype/nexus3
-
-nexus-password:
-	docker exec nexus-server cat /nexus-data/admin.password && echo ""
-
-stop-nexus:
-	docker stop --time=120 nexus-server
+clean: stop
+clean:
+	-docker volume rm jenkins-data
+	-docker volume rm jenkins-docker-certs

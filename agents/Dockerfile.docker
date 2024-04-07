@@ -1,0 +1,19 @@
+# syntax=docker.io/docker/dockerfile:1.7.0
+
+ARG JENKINS_REGISTRY
+ARG JENKINS_TAG
+
+FROM ${JENKINS_REGISTRY}:${JENKINS_TAG} as agent
+
+FROM docker.io/library/alpine:3.19.0
+
+RUN apk --update --no-cache add \
+	openjdk17-jre \
+	docker \
+	git \
+	make
+
+COPY --from=agent --link /usr/local/bin/jenkins-agent /usr/local/bin/jenkins-agent
+COPY --from=agent --link /usr/share/jenkins/agent.jar /usr/share/jenkins/agent.jar
+
+ENTRYPOINT ["/usr/local/bin/jenkins-agent"]

@@ -1,0 +1,19 @@
+# syntax=docker.io/docker/dockerfile:1.7.0
+
+ARG JENKINS_REGISTRY
+ARG JENKINS_TAG
+
+FROM ${JENKINS_REGISTRY}:${JENKINS_TAG} as agent
+
+FROM docker.io/library/maven:3.9.6-eclipse-temurin-17-alpine
+
+RUN apk --update --no-cache add \
+    fontconfig \
+    freetype \
+    git \
+    make
+
+COPY --from=agent --link /usr/local/bin/jenkins-agent /usr/local/bin/jenkins-agent
+COPY --from=agent --link /usr/share/jenkins/agent.jar /usr/share/jenkins/agent.jar
+
+ENTRYPOINT ["/usr/local/bin/jenkins-agent"]
